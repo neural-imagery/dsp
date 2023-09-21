@@ -11,12 +11,12 @@ if not os.path.exists(out):
     os.makedirs(out)
 
 
-img_paths = []
+img_ids = []
 betas = []
 event_paths = []
 
 images = h5py.File('nsd_stimuli.hdf5.1', 'r')
-breakpoint()
+# breakpoint()
 
 for path in runs:
     folder, file = os.path.split(path)
@@ -37,10 +37,12 @@ for path in runs:
     # 10k_ids = df["10k_id"]
     # 73k_ids = df["73k_id"]
     num_trials = len(df)
-    for id73k, id10k in zip(df["73k_id"], df["10k_id"]):
-        img_path = "images/shared{}_nsd{}.png".format(str(id10k).zfill(4), str(id73k).zfill(5))
-        # print(img_path)
-        img_paths.append(img_path)
+    # breakpoint()
+    img_ids.extend(list(df["73k_id"].values))
+    # for id73k, id10k in zip(df["73k_id"], df["10k_id"]):
+    #     img_path = "images/shared{}_nsd{}.png".format(str(id10k).zfill(4), str(id73k).zfill(5))
+    #     # print(img_path)
+    #     img_paths.append(img_path)
 
     # for on in df["onset"]:
     #     # print(on)
@@ -57,9 +59,9 @@ max_channels =  max([b.shape[0] for b in betas])
 betas = [np.pad(b, ((0,max_channels-b.shape[0]), (0,0))) for b in betas]
 betas = np.hstack(betas)
 assert betas.shape[-1] == len(event_paths)
-assert len(event_paths) == len(img_paths)
+assert len(event_paths) == len(img_ids)
 ds = pd.DataFrame({
-    "img_paths": img_paths,
+    "img_ids": img_ids,
     "event_paths": event_paths
 })
 ds.to_csv("{}/paths.csv".format(out))

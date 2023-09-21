@@ -3,6 +3,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from torch import nn, optim
 from PIL import Image
+import h5py
 import utils
 from accelerate import Accelerator
 accelerator = Accelerator(log_with="wandb")
@@ -16,32 +17,38 @@ config = {
 }
 
 # https://huggingface.co/docs/accelerate/concept_guides/performance
+print(f"{accelerator.num_processes = }")
 config["lr"] *= accelerator.num_processes
 clip_model, preprocess = clip.load("ViT-B/32", device=device, jit=False)
-accelerator.init_trackers("clip1", config=config)
+
 
 
 class fNIRSDataset(Dataset):
     def __init__(self, path):
         self.df, self.betas = utils.load_ds(path)
         self.betas = self.betas.T
-        self.img_paths = self.df["img_paths"]
-        assert len(self.betas) == len(self.img_paths)
+        self.images = h5py.File('nsd_stimuli.hdf5.1', 'r')
+        self.img_ids = self.df["img_ids"]
+        assert len(self.betas) == len(self.img_ids)
 
     def __len__(self):
         return len(self.df)
 
     def __getitem__(self, idx):
         # image = preprocess(Image.open(self.img_paths[idx]))
-        image = preprocess(Image.open(
-            "images/shared0001_nsd02951.png"))  # dummy for now
+        img_id = self.img_ids[idx]
+        image = preprocess(Image.fromarray(self.images['imgBrick'][img_id]))
+        # image = preprocess(Image.open(
+        #     "images/shared0001_nsd02951.png"))  # dummy for now
         betas = self.betas[idx]
         return image, betas
 
 
 ds = fNIRSDataset("dataset")
+# breakpoint()
 dl = DataLoader(ds, batch_size=config["batch_size"], shuffle=True)
 
+accelerator.init_trackers("clip1", config=config)
 loss_img = nn.CrossEntropyLoss()
 loss_txt = nn.CrossEntropyLoss()
 
