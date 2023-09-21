@@ -4,11 +4,21 @@ from torch.utils.data import Dataset, DataLoader
 from torch import nn, optim
 from PIL import Image
 import utils
+from accelerate import Accelerator
+accelerator = Accelerator(log_with="wandb")
+
 
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
-batch_size = 64
-epochs = 100
+config = {
+    "batch_size": 64,
+    "epochs": 100,
+    "lr": 5e-5
+}
+
+# https://huggingface.co/docs/accelerate/concept_guides/performance
+config["lr"] *= accelerator.num_processes
 clip_model, preprocess = clip.load("ViT-B/32", device=device, jit=False)
+accelerator.init_trackers("clip1", config=config)
 
 
 class fNIRSDataset(Dataset):
@@ -30,7 +40,7 @@ class fNIRSDataset(Dataset):
 
 
 ds = fNIRSDataset("dataset")
-dl = DataLoader(ds, batch_size=batch_size, shuffle=True)
+dl = DataLoader(ds, batch_size=config["batch_size"], shuffle=True)
 
 loss_img = nn.CrossEntropyLoss()
 loss_txt = nn.CrossEntropyLoss()
@@ -50,14 +60,18 @@ class fNIRSEmbedding(nn.Module):
         x = self.fc2(x)
         return x
 
+
 # embedding_size stolen from CLIP
 model = fNIRSEmbedding(ds.betas.shape[-1], 512)
 model = model.to(device)
-optimizer = optim.Adam(model.parameters(), lr=5e-5,
+optimizer = optim.Adam(model.parameters(), lr=config["lr"],
                        betas=(0.9, 0.98), eps=1e-6, weight_decay=0.2)
 
-it = 0
-for epoch in range(epochs):
+step = 0
+model, optimizer, training_dataloader = accelerator.prepare(
+    model, optimizer, dl
+)
+for epoch in range(config["epochs"]):
     for batch in dl:
         optimizer.zero_grad()
         images, betas = batch
@@ -65,27 +79,27 @@ for epoch in range(epochs):
         images = images.to(device)
         betas = betas.to(device).float()
 
-        # breakpoint()
         image_features = clip_model.encode_image(images)
         beta_features = model(betas)
 
-        # normalized features
-        image_features = image_features / image_features.norm(dim=1, keepdim=True)
+        image_features = image_features / \
+            image_features.norm(dim=1, keepdim=True)
         beta_features = beta_features / beta_features.norm(dim=1, keepdim=True)
 
-        # cosine similarity as logits
         logit_scale = clip_model.logit_scale.exp()
-        # breakpoint()
         logits_per_image = logit_scale * image_features.float() @ beta_features.t()
-        logits_per_beta = logits_per_image.t()
-
-        # shape = [global_batch_size, global_batch_size]
+        logits_per_beta = logits_per_image.t()  # (B, B)
 
         ground_truth = torch.arange(
             len(images), dtype=torch.long, device=device)
-        total_loss = (loss_img(logits_per_image, ground_truth) +
-                      loss_txt(logits_per_beta, ground_truth))/2
-        total_loss.backward()
-        print("epoch: {}, it: {}, loss: {}".format(epoch, it, total_loss.item()))
-        it += 1
+        loss = (loss_img(logits_per_image, ground_truth) +
+                loss_txt(logits_per_beta, ground_truth))/2
+        # total_loss.backward()
+        accelerator.backward(loss)
+
+        print("epoch: {}, step: {}, loss: {}".format(
+            epoch, step, loss.item()))
+        accelerator.log({"training_loss": loss, "epoch": epoch}, step=step)
         optimizer.step()
+        step += 1
+accelerator.end_training()

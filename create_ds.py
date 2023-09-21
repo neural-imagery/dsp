@@ -2,6 +2,8 @@ import glob
 import pandas as pd
 import numpy as np
 import os
+import h5py
+
 
 runs = glob.glob("data/**/head_seg.npy", recursive=True)
 out = "dataset"
@@ -12,6 +14,9 @@ if not os.path.exists(out):
 img_paths = []
 betas = []
 event_paths = []
+
+images = h5py.File('nsd_stimuli.hdf5.1', 'r')
+breakpoint()
 
 for path in runs:
     folder, file = os.path.split(path)
