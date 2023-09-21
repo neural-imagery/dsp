@@ -19,7 +19,7 @@ config = {
 # https://huggingface.co/docs/accelerate/concept_guides/performance
 print(f"{accelerator.num_processes = }")
 config["lr"] *= accelerator.num_processes
-clip_model, preprocess = clip.load("ViT-B/32", device=device, jit=False)
+clip_model, preprocess = clip.load("ViT-B/32", device=device, jit=False, download_root="/lfs/ampere1/0/suppakit")
 
 
 
@@ -45,7 +45,7 @@ class fNIRSDataset(Dataset):
 
 
 ds = fNIRSDataset("dataset")
-# breakpoint()
+breakpoint()
 dl = DataLoader(ds, batch_size=config["batch_size"], shuffle=True)
 
 accelerator.init_trackers("clip1", config=config)
@@ -53,24 +53,54 @@ loss_img = nn.CrossEntropyLoss()
 loss_txt = nn.CrossEntropyLoss()
 
 
+# class fNIRSEmbedding(nn.Module):
+#     def __init__(self, input_size, embedding_size, hidden_size=64):
+#         super(fNIRSEmbedding, self).__init__()
+
+#         self.fc1 = nn.Linear(input_size, hidden_size)
+#         self.fc2 = nn.Linear(hidden_size, embedding_size)
+#         self.relu = nn.ReLU()
+
+#     def forward(self, x):
+#         x = self.fc1(x)
+#         x = self.relu(x)
+#         x = self.fc2(x)
+#         return x
+
 class fNIRSEmbedding(nn.Module):
-    def __init__(self, input_size, embedding_size, hidden_size=64):
+    def __init__(self, input_size, embedding_size, hidden_size=256):
         super(fNIRSEmbedding, self).__init__()
 
         self.fc1 = nn.Linear(input_size, hidden_size)
-        self.fc2 = nn.Linear(hidden_size, embedding_size)
+        self.fc2 = nn.Linear(hidden_size, hidden_size*2)
+        self.fc3 = nn.Linear(hidden_size*2, hidden_size*4)
+        self.fc4 = nn.Linear(hidden_size*4, hidden_size*2)
+        self.fc5 = nn.Linear(hidden_size*2, hidden_size)
+        self.fc6 = nn.Linear(hidden_size, embedding_size)
         self.relu = nn.ReLU()
 
     def forward(self, x):
         x = self.fc1(x)
         x = self.relu(x)
         x = self.fc2(x)
+        x = self.relu(x)
+        x = self.fc3(x)
+        x = self.relu(x)
+        x = self.fc4(x)
+        x = self.relu(x)
+        x = self.fc5(x)
+        x = self.relu(x)
+        x = self.fc6(x)
         return x
+
 
 
 # embedding_size stolen from CLIP
 model = fNIRSEmbedding(ds.betas.shape[-1], 512)
 model = model.to(device)
+num_params =utils.count_parameters(model)
+accelerator.log({"num_params": num_params})
+print("num params: {}".format(num_params))
 optimizer = optim.Adam(model.parameters(), lr=config["lr"],
                        betas=(0.9, 0.98), eps=1e-6, weight_decay=0.2)
 
