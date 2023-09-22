@@ -10,25 +10,31 @@ from accelerate import DistributedDataParallelKwargs
 from accelerate import Accelerator
 from sklearn.preprocessing import StandardScaler
 import os
-ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=False)
 accelerator = Accelerator(log_with="wandb", kwargs_handlers=[ddp_kwargs])
 
 
 # device = "cuda" if torch.cuda.is_available() else "cpu"
 device = "cuda"
 config = {
-    # "batch_size": 2048,
-    "batch_size": 2400,
+    "batch_size": 2048,
+    # "batch_size": 2400,
     "epochs": 100,
     "lr": 5e-5,
     "weight_decay": 0.001,
-    "name": "exp",
-    "seq_len": 3
+    "name": "6gpu-5",
+    "seq_len": 3,
+    "d_model": 256,
+    "nhead": 16,
+    "num_layers": 24,
+    "dim_feedforward": 4096,
+    "dropout": 0.1
 }
 ds_name = "seq_dataset_{}".format(config["seq_len"])
 
 ckpt_dir = "ckpts/{}".format(config["name"])
-if not os.path.exists(ckpt_dir):
+if accelerator.is_main_process:
+    assert not os.path.exists(ckpt_dir)
     os.makedirs(ckpt_dir)
 
 
@@ -51,7 +57,8 @@ class fNIRSDataset(Dataset):
         seq_features = seq_features.reshape(-1, d)
         scaler = StandardScaler()
         seq_features = scaler.fit_transform(seq_features)
-        seq_features = seq_features.reshape(-1, config["seq_len"], d)  # (N, seq_len, 319)
+        # (N, seq_len, 319)
+        seq_features = seq_features.reshape(-1, config["seq_len"], d)
         self.seq_features = seq_features
 
         self.images = h5py.File('nsd_stimuli.hdf5.1', 'r')
@@ -59,7 +66,7 @@ class fNIRSDataset(Dataset):
         assert self.seq_features.shape[0] == len(self.img_ids)
 
     def __len__(self):
-        return len(self.df) 
+        return len(self.df)
 
     def __getitem__(self, idx):
         # image = preprocess(Image.open(self.img_paths[idx]))
@@ -79,20 +86,83 @@ accelerator.init_trackers("clip1", config=config)
 loss_img = nn.CrossEntropyLoss()
 loss_fnirs = nn.CrossEntropyLoss()
 
-# embedding_size stolen from CLIP
-num_params = utils.count_parameters(clip_model)
-accelerator.log({"num_params": num_params})
-print("num params: {}".format(num_params))
-clip_model = clip_model.to(device)
-clip_model.train()
-optimizer = optim.Adam(clip_model.parameters(), lr=config["lr"],
-                       betas=(0.9, 0.98), eps=1e-6, weight_decay=config["weight_decay"])
 
 step = 1
-clip_model, optimizer, training_dataloader = accelerator.prepare(
-    clip_model, optimizer, dl
+
+
+class PositionalEncoding(nn.Module):
+
+    def __init__(self, d_model, dropout=0.1, max_len=5000):
+        super(PositionalEncoding, self).__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float(
+        ) * (-torch.log(torch.tensor(10000.0)) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        x = x + self.pe[:, :x.size(1), :]
+        return self.dropout(x)
+
+
+class TimeSeriesTransformer(nn.Module):
+
+    def __init__(self, d_model=512, nhead=8, num_layers=6, dim_feedforward=2048, dropout=0.1):
+        super(TimeSeriesTransformer, self).__init__()
+        self.model_type = 'Transformer'
+        self.pos_encoder = PositionalEncoding(d_model)
+        self.transformer_encoder = nn.TransformerEncoder(nn.TransformerEncoderLayer(
+            d_model, nhead, dim_feedforward, dropout), num_layers)
+        self.dense = nn.Linear(d_model, 512)
+        self.init_weights()
+
+    def init_weights(self):
+        initrange = 0.1
+        self.dense.bias.data.zero_()
+        self.dense.weight.data.uniform_(-initrange, initrange)
+
+    def forward(self, src):
+        # rearrange input to have sequence length dimension first, for the Positional Encoding
+        src = src.permute(1, 0, 2)
+        src = self.pos_encoder(src)
+        output = self.transformer_encoder(src)
+        # mean used to generate a single embedding
+        output = self.dense(output.mean(dim=0))
+        return output
+
+
+# d_model = ds.seq_features.shape[-1]
+print(f"{config['d_model'] = }")
+
+model = TimeSeriesTransformer(
+    config["d_model"], config["nhead"], config["num_layers"], config["dim_feedforward"], config["dropout"]).to(device)
+
+# embedding_size stolen from CLIP
+num_params = utils.count_parameters(model)
+accelerator.log({"num_params": num_params})
+print("num params: {}".format(num_params))
+
+
+optimizer = optim.Adam(model.parameters(), lr=config["lr"],
+                       betas=(0.9, 0.98), eps=1e-6, weight_decay=config["weight_decay"])
+
+model, optimizer, training_dataloader = accelerator.prepare(
+    model, optimizer, dl
 )
-save_every = 10
+
+def save(path, accelerator, model, optim):
+    pkg = dict(
+        model = accelerator.get_state_dict(model),
+        optim = optim.state_dict(),
+    )
+    torch.save(pkg, path)
+
+save_model_every = 10
 for epoch in range(config["epochs"]):
     for batch in dl:
         optimizer.zero_grad()
@@ -100,17 +170,33 @@ for epoch in range(config["epochs"]):
 
         images = images.to(device)
         features = features.to(device).float()
+        features = features[:, :, :config["d_model"]]
+        # print(f"{features.shape = }")
+
+        image_features = clip_model.encode_image(images)
+        fnirs_features = model(features)
+
+        image_features = image_features / \
+            image_features.norm(dim=1, keepdim=True)
+        fnirs_features = fnirs_features / \
+            fnirs_features.norm(dim=1, keepdim=True)
+
+        logit_scale = clip_model.logit_scale.exp()
+        logits_per_image = logit_scale * image_features.float() @ fnirs_features.t()
+        logits_per_fnirs = logits_per_image.t()  # (B, B)
 
         ground_truth = torch.arange(
             len(images), dtype=torch.long, device=device)
-        logits_per_image, logits_per_fnirs = clip_model(images, features)
         loss = (loss_img(logits_per_image, ground_truth) +
                 loss_fnirs(logits_per_fnirs, ground_truth))/2
-        if not step % save_every and accelerator.is_main_process:
-            embed()
-            accelerator.save_model(clip_model, ckpt_dir)
-
+        # total_loss.backward()
         accelerator.backward(loss)
+
+        if accelerator.is_main_process and not (step % save_model_every):
+            model_path = "{}/{}.pt".format(ckpt_dir, step)
+            # accelerator.save_model(model, model_path)
+            save(model_path, accelerator, optimizer, model)
+            print(f'{step}: saving model to {ckpt_dir}')
 
         if accelerator.is_main_process:
             print("epoch: {}, step: {}, loss: {}".format(
