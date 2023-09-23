@@ -26,9 +26,9 @@ config = {
     "epochs": 100_000_000,
     "lr": 5e-5,
     "weight_decay": 0.001,
-    "name": "6gpu-6",
+    "name": "eval-clip",
     "seq_len": 3,
-    "d_model": 256,
+    "d_model": 240,
     "nhead": 16,
     "num_layers": 24,
     "dim_feedforward": 4096,
@@ -36,10 +36,10 @@ config = {
     # "resume_path": "/lfs/ampere1/0/suppakit/ml/ckpts/6gpu-5/800.pt"
     # "resume_path": "/lfs/ampere1/0/suppakit/ml/ckpts/6gpu-testckpt1/10"
     # "resume_path": "/lfs/ampere1/0/suppakit/ml/ckpts/6gpu-6/780"
-    "resume_path": "/lfs/ampere1/0/suppakit/ml/ckpts/6gpu-10/50"
+    "resume_path": "/lfs/ampere1/0/suppakit/ml/ckpts/1gpu-15/10"
 }
 
-config["ds_name"] = "seq_dataset_{}".format(config["seq_len"])
+config["ds_name"] = "train_seq_dataset_{}".format(config["seq_len"])
 config["val_ds_name"] = "val_seq_dataset_{}".format(config["seq_len"])
 
 # https://huggingface.co/docs/accelerate/concept_guides/performance
@@ -54,8 +54,9 @@ clip_model, preprocess = clip.load(
 train_ds = fNIRSDataset(config["ds_name"], preprocess)
 print(f"{len(train_ds) = }")
 train_dl = DataLoader(train_ds, batch_size=config["batch_size"])
-val_ds = fNIRSDataset(config["val_ds_name"], preprocess, scaler=train_ds.scaler, trunc=train_ds.seq_features.shape[-1])
+val_ds = fNIRSDataset(config["val_ds_name"], preprocess)
 val_dl = DataLoader(val_ds, batch_size=config["batch_size"])
+print(f"{len(val_ds) = }")
 # breakpoint()
 
 accelerator.init_trackers("clip1", config=config)
@@ -140,7 +141,7 @@ if "resume_path" in config:
         print("resuming from resume_dir: {}".format(resume_dir))
 
 
-def eval_ds(dl, ds_type="train"):
+def eval_ds(dl, ds_type="train", ks=[1,3,5,10,100,500,1000,5000,10_000]):
     fnirs_features = []
     gt_img_ids = []
     for i, batch in enumerate(dl):
@@ -183,9 +184,10 @@ def eval_ds(dl, ds_type="train"):
     plt.ylabel('freq')
     plt.savefig('{}_ranks_hist.png'.format(ds_type))
     accelerator.log({"{}_ranks_hist".format(ds_type): wandb.Image("{}_ranks_hist.png".format(ds_type))})
-    top5_acc = sum(all_ranks < 5) / len(all_ranks)
-    print("[{}] top5 acc: {}".format(ds_type, top5_acc))
-    accelerator.log({"{}_top5_acc".format(ds_type): top5_acc})
+    for k in ks:
+        topk_acc = sum(all_ranks < k) / len(all_ranks)
+        print("[{}] top{} acc: {}".format(ds_type,k,  topk_acc))
+        accelerator.log({"{}_top{}_acc".format(ds_type, k): topk_acc})
 
 eval_ds(train_dl, ds_type="train")
 eval_ds(val_dl, ds_type="val")

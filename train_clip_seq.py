@@ -23,9 +23,9 @@ config = {
     "epochs": 100_000_000,
     "lr": 5e-5,
     "weight_decay": 0.001,
-    "name": "6gpu-10",
+    "name": "8gpu-1",
     "seq_len": 3,
-    "d_model": 256,
+    "d_model": 240,
     "nhead": 16,
     "num_layers": 24,
     "dim_feedforward": 4096,
@@ -33,7 +33,7 @@ config = {
     # "resume_path": "/lfs/ampere1/0/suppakit/ml/ckpts/6gpu-testckpt1/10"
 }
 
-ds_name = "seq_dataset_{}".format(config["seq_len"])
+ds_name = "train_seq_dataset_{}".format(config["seq_len"])
 
 ckpt_dir = "ckpts/{}".format(config["name"])
 if accelerator.is_main_process:
@@ -84,15 +84,14 @@ clip_model, preprocess = clip.load(
 
 ds = fNIRSDataset(ds_name, preprocess)
 print(f"{ds_name = }, {len(ds) = }")
+# breakpoint()
 dl = DataLoader(ds, batch_size=config["batch_size"], shuffle=True)
 
 accelerator.init_trackers("clip1", config=config)
 loss_img = nn.CrossEntropyLoss()
 loss_fnirs = nn.CrossEntropyLoss()
 
-
 step = 1
-
 
 class PositionalEncoding(nn.Module):
 

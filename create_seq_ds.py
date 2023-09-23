@@ -3,11 +3,21 @@ import pandas as pd
 import numpy as np
 import os
 import h5py
+from joblib import dump, load
+from sklearn.preprocessing import StandardScaler
 
 
-runs = glob.glob("val_data/**/head_seg.npy", recursive=True)
+ds_type = "val"
+runs = glob.glob("{}_data/**/head_seg.npy".format(ds_type), recursive=True)
+if ds_type == "train":
+    scaler = StandardScaler()
+    good_rows = []
+else:
+    print("load scaler and good_rows!")
+    scaler = load("scaler.joblib")
+    good_rows = np.load("good_rows.npy")
 seq_len = 3
-out = "val_seq_dataset_{}".format(seq_len)
+out = "{}_seq_dataset_{}".format(ds_type, seq_len)
 if not os.path.exists(out):
     os.makedirs(out)
 
@@ -17,8 +27,36 @@ seq_features = []
 event_paths = []
 
 images = h5py.File('nsd_stimuli.hdf5.1', 'r')
-# breakpoint()
 
+# create the scaler
+if ds_type == "train":
+    print("fitting scaler!")
+    all_data = []
+    for path in runs:
+        folder, file = os.path.split(path)
+        fnirs_folder = os.path.join(folder, "fnirs_data")
+        fnirs = glob.glob("{}/*.npy".format(fnirs_folder))
+        data = []
+        for x in fnirs:
+            d = np.load(x)
+            # print("path: {}, shape: {}".format(x, d.shape))
+            data.append(d)
+        data = np.vstack(data)
+        if not len(good_rows):
+            for i in range(data.shape[0]):
+                if data[i].sum() != 0:
+                    good_rows.append(i)
+            print("len good rows: {}".format(len(good_rows)))
+            good_rows = np.array(good_rows)
+            np.save("good_rows.npy", good_rows)
+        data = data[good_rows]
+        all_data.append(data)
+    all_data = np.vstack(all_data)
+    all_data = scaler.fit_transform(all_data)
+    dump(scaler, "scaler.joblib")
+    # breakpoint()
+
+print(f"{len(good_rows) = }")
 
 for path in runs:
     folder, file = os.path.split(path)
@@ -32,14 +70,15 @@ for path in runs:
         # print("path: {}, shape: {}".format(x, d.shape))
         data.append(d)
     data = np.vstack(data)
+    data = data[good_rows]
+    # normalize!
+    data = scaler.transform(data)
+
     times = np.arange(data.shape[-1]) * 1.6
-    # 10k_ids = df["10k_id"]
-    # 73k_ids = df["73k_id"]
     num_trials = len(df)
-    # breakpoint()
     img_ids.extend(list(df["73k_id"].values))
     onsets = df["onset"].values
-    # breakpoint()
+
     for i, on in enumerate(onsets):
         time_idx = np.where(times > on)[0][0]
         feat = data[:, time_idx:time_idx+seq_len]
@@ -50,7 +89,6 @@ for path in runs:
         seq_features.append(feat)
 
     print(f"{data.shape = }, {path = }")
-    # breakpoint()
     event_paths.extend([path] * num_trials)
 
 
