@@ -5,9 +5,9 @@ import os
 import h5py
 
 
-runs = glob.glob("data/**/head_seg.npy", recursive=True)
+runs = glob.glob("val_data/**/head_seg.npy", recursive=True)
 seq_len = 3
-out = "seq_dataset_{}".format(seq_len)
+out = "val_seq_dataset_{}".format(seq_len)
 if not os.path.exists(out):
     os.makedirs(out)
 
